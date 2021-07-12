@@ -1,0 +1,125 @@
+currentBuild.displayName = "Demopipeline-#"+currentBuild.number
+
+pipeline
+{
+    agent any
+    
+    environment{
+        PATH = "/opt/apache-maven-3.8.1/bin:$PATH"
+        scannerHome = tool 'sonar_scanner'
+        
+    }
+    
+    stages{
+        stage("Git Checkout"){
+            steps{
+                
+                git 'https://github.com/ganjivasu/my-app'
+                
+                }                
+        }                
+        stage("Maven Build")
+        {
+            steps{
+                sh "mvn clean package"
+                sh "mv target/*.war target/my-app.war"
+                
+            }
+            
+        }
+        stage('SonarQube Analysis') {
+            
+           steps{
+                withSonarQubeEnv('SonarQube') { 
+                    sh """
+                        mvn sonar:sonar \
+                        -Dsonar.host.url=http://13.233.148.153:9000 \
+                        -Dsonar.login=4206e15f03e44faa978f57cfa3c0e51ba12817eb
+                    """
+                }
+                }
+        
+            }
+        stage("Upload war file to nexus")
+        {
+            steps{                
+                nexusArtifactUploader artifacts: [
+                    [
+                        artifactId: 'myweb',
+                        classifier: '',
+                        file: 'target/my-app.war',
+                        type: 'war'
+                    ]
+                ],
+                credentialsId: 'nexus3',
+                groupId: 'in.javahome',
+                nexusUrl: '172.31.43.91:8081',
+                nexusVersion: 'nexus3',
+                protocol: 'http',
+                repository: 'uploadtonexus',
+                version: '0.0.15'
+            }
+        }
+        
+        stage("Deploy war file to s3")
+         {
+            steps{
+                withCredentials([aws(accessKeyVariable: 'AWS_ACCESS_KEY_ID', credentialsId: 'deploytos3', secretKeyVariable: 'AWS_SECRET_ACCESS_KEY')]) {
+                    sh "aws s3 ls"
+                    sh "aws s3 cp target/my-app.war s3://jenkinspipelinerollback/v2.war"
+                    }
+                  }
+         }
+         
+        
+
+
+        stage("Deploy to tomcat")
+        {
+            steps{
+                sshagent(['tomcatserver']) {
+                    sh """
+                        scp -o StrictHostKeyChecking=no target/my-app.war ec2-user@172.31.9.31:/opt/tomcat8/webapps/
+                        
+                        ssh ec2-user@172.31.9.31 /opt/tomcat8/bin/shutdown.sh
+                        
+                        ssh ec2-user@172.31.9.31 /opt/tomcat8/bin/startup.sh
+                    """
+                    }                
+                }
+         }
+         stage("Slack notifications")
+            {
+                    steps{
+                    slackSend baseUrl: 'https://hooks.slack.com/services/',
+                    channel: '#tx_aws',
+                    color: 'good',
+                    message: 'Jenkins Pipeline Triggered',
+                    teamDomain: 'testingxpertsaws',
+                    tokenCredentialId: 'tx_aws',
+                    username: 'jenkins'
+                    }
+             }
+                   
+    }
+    
+    post {
+        //always {
+            //echo 'One way or another, I have finished'
+            //deleteDir() /* clean up our workspace */
+        //}
+        success {
+            slackSend (color: '#00FF00', message: currentBuild.displayName + " " + "Build succeeded!", channel: "#tx_aws")
+        }
+        unstable {
+            slackSend (color: '#FFFE89', message: currentBuild.displayName + " " + "Build was unstable!", channel: "#tx_aws")
+        }
+        failure {
+            slackSend (color: '#FF0000', message: currentBuild.displayName + " " + "Build Failed", channel: "#tx_aws")
+        }
+        changed {
+            slackSend (color: '#D4DADF', message: currentBuild.displayName + " " + "Changed", channel: "#tx_aws")
+        }
+    }
+}
+    
